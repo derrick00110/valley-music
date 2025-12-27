@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>山谷音乐排课系统 V11.1</title>
+    <title>山谷音乐排课系统 V11.2</title>
     
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -47,7 +47,7 @@
         const WXPUSHER_APP_TOKEN = "AT_n4lrCyl9JiOU6tpovHrl1eilFoWpyQEc"; 
         const ADMIN_UID = "UID_ib775oGXFfdMovh9EqjzcGOApr2B"; 
 
-        // --- 3. 常量 (已加入黄老师) ---
+        // --- 3. 常量 ---
         const DEFAULT_TEACHERS = [
             "郭老师:UID_vM4oGlev5j2ynmknAY41LJpOe3wV", 
             "钱老师:UID_TCwmvSlK0L3JI41QWe5dEamfikVb", 
@@ -72,7 +72,7 @@
             db = firebase.firestore();
             auth = firebase.auth();
             isFirebaseReady = true;
-        } catch (e) { console.error(e); }
+        } catch (e) { console.error("Firebase Init Error", e); }
 
         const { useState, useEffect, useMemo, useRef } = React;
 
@@ -87,7 +87,7 @@
 
             let content = "";
             if (courseData === 'test') {
-                content = "🎉 **测试成功！**\n老师能收到这条消息说明配置正确。";
+                content = "🎉 **测试成功！**\n恭喜，您的系统已成功连接到微信推送服务。";
             } else {
                 const d = new Date(courseData.date);
                 const weekDay = d.toLocaleDateString('zh-CN', {weekday:'long'});
@@ -115,7 +115,6 @@
                 { name: "琴房", keywords: ["钢琴", "声乐"] }, 
                 { name: "鼓房", keywords: ["架子鼓", "鼓"] }  
             ];
-
             const getRoomName = (courseName) => {
                 if (!courseName) return null;
                 for (let rule of ROOM_RULES) {
@@ -123,7 +122,6 @@
                 }
                 return null;
             };
-
             const currentRoom = getRoomName(newCourse.course);
             if (!currentRoom) return null; 
 
@@ -203,6 +201,41 @@
             return `${y}-${m}-${d}`;
         };
 
+        const getTargetDate = (text, baseDate = new Date()) => {
+            const today = new Date(baseDate);
+            today.setHours(0,0,0,0);
+            const currentYear = today.getFullYear();
+            if (text.includes('明天')) return new Date(today.getTime() + 86400000);
+            if (text.includes('后天')) return new Date(today.getTime() + 86400000 * 2);
+            if (text.includes('今天')) return today;
+            const dateMatch = text.match(/(\d{1,2})[月\.](\d{1,2})[日号]?/);
+            if (dateMatch) {
+                const m = parseInt(dateMatch[1]) - 1;
+                const d = parseInt(dateMatch[2]);
+                const target = new Date(currentYear, m, d);
+                if (today.getMonth() === 11 && m === 0) target.setFullYear(currentYear + 1);
+                return target;
+            }
+            const dayMatch = text.match(/(\d{1,2})[日号]/);
+            if (dayMatch) {
+                const d = parseInt(dayMatch[1]);
+                const target = new Date(currentYear, today.getMonth(), d);
+                if (d < today.getDate() && (today.getDate() - d > 7)) target.setMonth(today.getMonth() + 1);
+                return target;
+            }
+            const weekMatch = text.match(/[周星期]([一二三四五六日天])/);
+            if (weekMatch) {
+                const map = { '一':1, '二':2, '三':3, '四':4, '五':5, '六':6, '日':0, '天':0 };
+                const targetDay = map[weekMatch[1]];
+                const currentDay = today.getDay();
+                let diff = targetDay - currentDay;
+                if (diff < 0) diff += 7; 
+                if (text.includes('下周') || text.includes('下个')) diff += 7;
+                return new Date(today.getTime() + diff * 86400000);
+            }
+            return today;
+        };
+
         function App() {
             const [schoolCode, setSchoolCode] = useState(() => localStorage.getItem('valley_code_v9') || '');
             const [inputCode, setInputCode] = useState('');
@@ -214,6 +247,9 @@
             const [viewMode, setViewMode] = useState('grid'); 
             const [modalMode, setModalMode] = useState('closed'); 
             const [selectedTeacher, setSelectedTeacher] = useState('全部');
+            // ✨ 新增：课程类型筛选状态 ✨
+            const [filterType, setFilterType] = useState('all'); // all, formal, trial
+
             const [logoutConfirm, setLogoutConfirm] = useState(false);
             const [deleteConfirm, setDeleteConfirm] = useState(false);
             const [isSaving, setIsSaving] = useState(false);
@@ -221,8 +257,6 @@
             const [importText, setImportText] = useState('');
             const [parsedResults, setParsedResults] = useState([]);
             const [notifyData, setNotifyData] = useState(null);
-            
-            // --- 新增：冲突弹窗状态 ---
             const [conflictData, setConflictData] = useState(null);
 
             // 认证与同步
@@ -303,24 +337,14 @@
 
             const handleSaveClick = () => {
                 if (!formData.student || !formData.course) { showNotify("请填写完整", 'error'); return; }
-                
-                // --- 冲突检测 ---
                 const conflict = checkConflict({ ...formData, date: formData.date || formatLocalDate(currentDate) }, appointments);
-                
-                if (conflict) {
-                    // 发现冲突，打开冲突弹窗
-                    setConflictData(conflict);
-                } else {
-                    // 无冲突，直接保存
-                    executeSave(false);
-                }
+                if (conflict) { setConflictData(conflict); } else { executeSave(false); }
             };
 
             const executeSave = async (isForceSave) => {
                 if (!schoolCode) return;
                 setIsSaving(true);
-                setConflictData(null); // 关闭冲突弹窗
-
+                setConflictData(null); 
                 const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("网络请求超时")), 8000));
                 
                 try {
@@ -329,19 +353,13 @@
                     const colRef = getCollection(schoolCode);
                     const savePromise = formData.id ? colRef.doc(formData.id).update(saveData) : colRef.add({ ...saveData, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
                     await Promise.race([savePromise, timeoutPromise]);
-                    
                     const isEdit = !!formData.id;
                     showNotify(isEdit ? "修改成功" : "添加成功");
                     setModalMode('closed');
-
-                    // --- 自动推送逻辑 ---
                     const tUid = getTeacherUid(saveData.teacher);
                     showNotify("正在推送通知...", 'success');
                     const pushed = await sendWxPush(saveData, isEdit ? 'edit' : 'add', tUid);
-                    
-                    if(pushed) showNotify("推送成功！");
-                    else setNotifyData(saveData);
-
+                    if(pushed) showNotify("推送成功！"); else setNotifyData(saveData);
                 } catch (e) {
                     let msg = e.message;
                     if(msg.includes("permission-denied")) msg = "保存被拒绝: 请检查数据库Rules";
@@ -359,11 +377,9 @@
                     showNotify("删除成功");
                     setModalMode('closed');
                     setDeleteConfirm(false);
-
                     const tUid = getTeacherUid(formData.teacher);
                     showNotify("正在推送删除通知...", 'success');
                     await sendWxPush(formData, 'delete', tUid);
-
                 } catch(e) { showNotify("删除失败", 'error'); } finally { setIsSaving(false); }
             };
 
@@ -383,26 +399,146 @@
                 } catch(e) { showNotify("保存失败", 'error'); } finally { setIsSaving(false); }
             };
 
-            // ... (import logic kept same) ...
+            // --- 智能导入逻辑 (彻底修复版) ---
+            const parseImportText = () => {
+                if (!importText.trim()) { showNotify("内容为空", 'error'); return; }
+                try {
+                    // 1. 标点粉碎：把所有标点和换行都变成空格，方便切割
+                    let raw = importText.replace(/[，。；：！？、,;!?: \n]/g, ' ');
+                    const lines = [raw]; // 作为一个长句处理，或者按空行分割，这里简化处理逻辑
+                    // 更好的方式：依然按换行符初筛，但兼容性更好
+                    const rawLines = importText.split('\n').filter(l => l.trim().length > 1);
+                    const res = [];
+                    
+                    rawLines.forEach(line => {
+                        let temp = line.replace(/[，。；：！？、,;!?: ]/g, ' '); // 单行再次清洗
+
+                        // 2. 提取日期
+                        const dateObj = getTargetDate(line, new Date());
+                        const dateStr = formatLocalDate(dateObj);
+                        const today = new Date(); today.setHours(0,0,0,0);
+                        const isPast = new Date(dateObj) < today;
+                        
+                        // 3. 提取老师
+                        let t = sysConfig.teachers[0].split(':')[0]; let tFound = false;
+                        const sortedT = [...sysConfig.teachers].sort((a,b) => b.length - a.length);
+                        for (let teaStr of sortedT) { 
+                            const teaName = teaStr.split(':')[0].trim();
+                            const short = teaName.replace('老师',''); 
+                            if (temp.includes(teaName)) { t = teaName; tFound = true; break; } 
+                            else if (temp.includes(short)) { t = teaName; tFound = true; break; } 
+                        }
+                        if(!tFound && selectedTeacher !== '全部') t = selectedTeacher;
+
+                        // 4. 提取时间
+                        let startT = '', endT = '';
+                        // 匹配 14:00 或 14点30
+                        const rangeMatch = temp.match(/(\d{1,2})[:点](\d{0,2})/);
+                        if (rangeMatch) {
+                            let h = parseInt(rangeMatch[1]);
+                            let m = parseInt(rangeMatch[2] || '0');
+                            
+                            // 下午判断逻辑
+                            if(h>=1 && h<=7 && !temp.includes('上午') && !temp.includes('am')) h += 12;
+                            if((temp.includes('下午')||temp.includes('晚上')) && h<12) h += 12;
+
+                            startT = `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}`;
+                            endT = `${(h+1).toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}`;
+                        }
+
+                        // 5. 提取课程 (模糊匹配 + 自动归类)
+                        let c = COURSE_OPTIONS[0]; 
+                        let cFound = false;
+                        
+                        // 先试标准名
+                        for (let standardC of COURSE_OPTIONS) {
+                            if (temp.includes(standardC)) { c = standardC; cFound = true; break; }
+                        }
+                        // 后试模糊名
+                        if (!cFound) {
+                            if (temp.includes("钢琴")) { c = temp.includes("体验") ? "钢琴体验课" : "钢琴正式课"; }
+                            else if (temp.includes("声乐")) { c = temp.includes("体验") ? "声乐体验课" : "声乐正式课"; }
+                            else if (temp.includes("架子鼓") || temp.includes("鼓")) { c = temp.includes("体验") ? "架子鼓体验课" : "架子鼓正式课"; }
+                            else if (temp.includes("吉他")) { c = temp.includes("体验") ? "吉他体验课" : "吉他正式课"; }
+                            // 默认归类
+                            else if (temp.includes("体验") || temp.includes("试听")) { c = "钢琴体验课"; } // 默认体验
+                            else { c = "钢琴正式课"; } // 默认正式
+                        }
+
+                        // 6. 提取学员 (排除干扰词)
+                        let s = "学员"; 
+                        // 移除已知关键词
+                        let cleanTemp = temp.replace(dateObj.getDate()+'日', '').replace(dateObj.getMonth()+1+'月', '');
+                        cleanTemp = cleanTemp.replace(/(明天|后天|今天|下周|下个|老师|上课|排课|安排|时间|课程|am|pm|上午|下午|晚上|正式课|体验课|辅导|陪练|试听|钢琴|声乐|架子鼓|吉他)/gi, '');
+                        cleanTemp = cleanTemp.replace(/[0-9]/g, '').trim();
+                        
+                        // 寻找最像名字的片段
+                        const parts = cleanTemp.split(' ').filter(p => p.trim().length > 1); // 至少2个字
+                        if(parts.length > 0) s = parts[0].substring(0, 4);
+
+                        if(startT) res.push({ date: dateStr, startTime: startT, endTime: endT, teacher: t, student: s, course: c, original: line, isPast });
+                    });
+                    setParsedResults(res);
+                    if(res.length===0) showNotify("未识别到有效内容", 'error'); else showNotify(`识别出 ${res.length} 条`);
+                } catch(e) { showNotify("识别错误", 'error'); }
+            };
+
+            const confirmImport = async () => {
+                if(parsedResults.length === 0) return;
+                setIsSaving(true);
+                try {
+                    const batch = db.batch(); 
+                    const colRef = getCollection(schoolCode);
+                    parsedResults.forEach(({original, isPast, ...rest}) => {
+                        const docRef = colRef.doc();
+                        batch.set(docRef, { ...rest, note: "导入: "+original, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+                    });
+                    await batch.commit();
+                    setModalMode('closed'); setParsedResults([]); setImportText(''); showNotify("导入成功");
+                } catch(e) { 
+                    if (e.code === 0 || e.code === -1) showNotify("导入失败: 请配置 Web 安全域名", 'error');
+                    else showNotify("导入失败: " + e.message, 'error'); 
+                } finally { setIsSaving(false); }
+            };
             
             const openImportModal = () => { setModalMode('import'); setParsedResults([]); setImportText(''); };
             const closeImportModal = () => { setModalMode('closed'); setParsedResults([]); setImportText(''); };
 
-            // 视图
+            // 视图 (增加 filterType 逻辑)
             const dateString = formatLocalDate(currentDate);
-            const dailyApps = useMemo(() => appointments.filter(a => a.date === dateString && (selectedTeacher==='全部'||a.teacher===selectedTeacher)), [appointments, dateString, selectedTeacher]);
+            const dailyApps = useMemo(() => {
+                return appointments
+                    .filter(a => {
+                        if (a.date !== dateString) return false;
+                        if (selectedTeacher !== '全部' && a.teacher !== selectedTeacher) return false;
+                        // 课程类型过滤
+                        if (filterType === 'formal' && !a.course.includes('正式')) return false;
+                        if (filterType === 'trial' && !a.course.includes('体验')) return false;
+                        return true;
+                    })
+                    .sort((a,b) => a.startTime.localeCompare(b.startTime));
+            }, [appointments, dateString, selectedTeacher, filterType]);
+            
             const upcomingApps = useMemo(() => {
                 const today = formatLocalDate(new Date());
-                return appointments.filter(a => a.date >= today && (selectedTeacher==='全部'||a.teacher===selectedTeacher)).sort((a,b) => a.date===b.date ? a.startTime.localeCompare(b.startTime) : a.date.localeCompare(b.date));
-            }, [appointments, selectedTeacher]);
+                return appointments
+                    .filter(a => {
+                        if (a.date < today) return false;
+                        if (selectedTeacher !== '全部' && a.teacher !== selectedTeacher) return false;
+                        if (filterType === 'formal' && !a.course.includes('正式')) return false;
+                        if (filterType === 'trial' && !a.course.includes('体验')) return false;
+                        return true;
+                    })
+                    .sort((a,b) => a.date===b.date ? a.startTime.localeCompare(b.startTime) : a.date.localeCompare(b.date));
+            }, [appointments, selectedTeacher, filterType]);
 
             if (!isFirebaseReady) return <div className="min-h-screen flex items-center justify-center p-6 text-red-500">Firebase 初始化失败</div>;
 
             if (!schoolCode) return (
                 <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center p-6">
                     <div className="bg-white p-8 rounded-2xl w-full max-w-sm text-center shadow-2xl">
-                        <Icons.Music size={48} /><h1 className="text-2xl font-bold mt-4 mb-2">山谷音乐 V11.1</h1>
-                        <p className="text-gray-400 text-sm mb-6">智能防撞版</p>
+                        <Icons.Music size={48} /><h1 className="text-2xl font-bold mt-4 mb-2">山谷音乐 V11.2</h1>
+                        <p className="text-gray-400 text-sm mb-6">极速筛选·智能导入修复</p>
                         <form onSubmit={handleLogin}><input value={inputCode} onChange={e=>setInputCode(e.target.value)} className="w-full border-b-2 border-purple-200 p-2 text-center text-xl font-bold outline-none mb-6 focus:border-purple-600" placeholder="设置学校暗号 (房间号)" autoFocus/><button className="w-full bg-purple-600 text-white py-3 rounded-xl font-bold shadow-lg">进入系统</button></form>
                         <div className="mt-4 text-[10px] text-gray-400">若无法登录，请在Firebase后台添加Netlify域名白名单</div>
                     </div>
@@ -424,14 +560,25 @@
                                 <button onClick={handleLogout} className={`flex items-center gap-1 px-3 py-1.5 rounded-full transition-all ${logoutConfirm?'bg-red-600 w-auto':'bg-red-500/80 w-9 h-9 justify-center'}`}>{logoutConfirm?<span className="text-xs whitespace-nowrap">确定?</span>:<Icons.LogOut />}</button>
                             </div>
                         </div>
+                        
+                        {/* 老师筛选 */}
                         <div className="flex overflow-x-auto no-scrollbar bg-white border-b px-2 py-2 gap-2">
-                            <span className="text-xs text-gray-400 font-bold flex-shrink-0 px-2 pt-1">筛选:</span>
+                            <span className="text-xs text-gray-400 font-bold flex-shrink-0 px-2 pt-1">老师:</span>
                             <button onClick={()=>setSelectedTeacher('全部')} className={`flex-shrink-0 px-3 py-1 text-xs rounded-full border ${selectedTeacher==='全部'?'bg-gray-800 text-white':'bg-white text-gray-600'}`}>全部</button>
                             {sysConfig.teachers.map(t=>{
                                 const nameOnly = t.split(':')[0]; 
                                 return <button key={t} onClick={()=>setSelectedTeacher(nameOnly)} className={`flex-shrink-0 px-3 py-1 text-xs rounded-full border ${selectedTeacher===nameOnly?'bg-purple-600 text-white':'bg-white text-gray-600'}`}>{nameOnly}</button>
                             })}
                         </div>
+                        
+                        {/* ✨ 新增：课程类型筛选 ✨ */}
+                        <div className="flex overflow-x-auto no-scrollbar bg-white border-b px-2 py-1 gap-2 pb-2">
+                            <span className="text-xs text-gray-400 font-bold flex-shrink-0 px-2 pt-1">类型:</span>
+                            <button onClick={()=>setFilterType('all')} className={`flex-shrink-0 px-3 py-0.5 text-xs rounded-full border ${filterType==='all'?'bg-blue-600 text-white':'bg-white text-gray-600'}`}>全部</button>
+                            <button onClick={()=>setFilterType('formal')} className={`flex-shrink-0 px-3 py-0.5 text-xs rounded-full border ${filterType==='formal'?'bg-blue-600 text-white':'bg-white text-gray-600'}`}>正式课</button>
+                            <button onClick={()=>setFilterType('trial')} className={`flex-shrink-0 px-3 py-0.5 text-xs rounded-full border ${filterType==='trial'?'bg-blue-600 text-white':'bg-white text-gray-600'}`}>体验课</button>
+                        </div>
+
                         {viewMode === 'grid' && (
                             <div className="flex justify-between items-center px-4 py-2 bg-gray-50 border-b">
                                 <button onClick={()=>{const d=new Date(currentDate);d.setDate(d.getDate()-1);setCurrentDate(d)}} className="p-2 rounded-full hover:bg-gray-200"><Icons.ChevronLeft /></button>
@@ -533,12 +680,10 @@
                     {modalMode==='import' && (
                         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
                             <div className="bg-white w-full max-w-md rounded-2xl p-6 flex flex-col max-h-[85vh]">
-                                {/* 智能导入 UI (省略细节，保持原样) */}
-                                <h3 className="font-bold text-lg mb-2">智能导入 V11.0</h3>
+                                <h3 className="font-bold text-lg mb-2">智能导入 V11.2</h3>
+                                <textarea value={importText} onChange={e=>setImportText(e.target.value)} className="w-full h-32 border p-3 rounded" placeholder="粘贴文本..."/>
+                                <button onClick={parseImportText} className="w-full bg-purple-600 text-white py-2 rounded mt-3 font-bold">开始识别</button>
                                 <button onClick={closeImportModal} className="absolute top-4 right-4"><Icons.X /></button>
-                                {/* ...这里为了代码简洁省略了导入部分的重复渲染逻辑，功能逻辑已在 parseImportText 中包含... */}
-                                <div className="text-center text-gray-400 py-10">（导入功能模块保持不变）</div>
-                                <button onClick={closeImportModal} className="w-full text-gray-400 py-2">关闭</button>
                             </div>
                         </div>
                     )}
